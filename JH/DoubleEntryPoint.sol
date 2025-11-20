@@ -128,3 +128,59 @@ contract DoubleEntryPoint is ERC20("DoubleEntryPointToken", "DET"), DelegateERC2
         return true;
     }
 }
+
+/*
+취약점: 
+CtrptoVault의 sweepToken함수는 금고에 있는 토큰을 수신자에게 전부 전송한다.
+LegacyToken의 transfer함수는 delegate가 설정되어 있으면 delegate의 delegateTransfer함수를 호출한다.
+CtrptoVault -> LegacyToken.transfer -> DoubleEntryPoint.delegateTransfer의 방식으로 호출하면 sweepToken함수를 우회하여 금고의 토큰을 탈취할 수 있다.
+
+해결방법:
+vault에서 lgt transfer를 감지하는 forta 봇을 만들어서 alert를 발생시키면 된다.
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface IDetectionBot {
+    function handleTransaction(address user, bytes calldata msgData) external;
+}
+
+interface IForta {
+    function raiseAlert(address user) external;
+}
+
+interface IDoubleEntryPoint {
+    function delegateTransfer(address to, uint256 value, address origSender) external returns (bool);
+}
+
+
+contract VaultDetectionBot is IDetectionBot {
+    address public immutable vault;        // CryptoVault 주소
+    IForta public immutable forta;         // Forta 컨트랙트
+
+    constructor(address _vault, address _forta) {
+        vault = _vault;
+        forta = IForta(_forta);
+    }
+
+    function handleTransaction(address user, bytes calldata msgData) external override {
+        // selector(4바이트)를 건너뛰고, 나머지를 (address, uint256, address)로 디코딩
+        (, , address origSender) =
+            abi.decode(msgData[4:], (address, uint256, address));
+
+        // origSender가 vault이고, user가 legacyToken이면 취약점 공격이므로 revert
+        if (origSender == vault) {
+            forta.raiseAlert(user);
+        }
+    }
+}
+
+/*
+풀이: 
+1. VaultDetectionBot 컨트랙트를 배포한다. 생성자에 CryptoVault 주소와 Forta 컨트랙트 주소를 넣어준다.
+2. Forta 컨트랙트에서 setDetectionBot함수를 호출하여 방금 배포한 VaultDetectionBot 주소를 등록한다.
+이제 CryptoVault에서 LegacyToken의 transfer함수를 호출하여 DoubleEntryPoint의 delegateTransfer함수를 호출하면,
+VaultDetectionBot의 handleTransaction함수가 실행되고, alert가 발생하여 공격이 차단된다.
+끝
+*/
